@@ -34,3 +34,12 @@ jobs:
           echo "=== lvs ==="; sudo lvs || true
           echo "=== docker root ==="; docker info --format '{{.DockerRootDir}}'
           echo "=== workspace ==="; df -h "$GITHUB_WORKSPACE"
+
+      - name: Docker and containerd internals
+        run: |
+          echo "=== docker version ==="; docker version || true
+          echo "=== daemon.json ==="; sudo cat /etc/docker/daemon.json 2>/dev/null || echo "(none)"
+          echo "=== containerd root/state ==="; sudo grep -nE '^\s*(root|state)\s*=' /etc/containerd/config.toml 2>/dev/null || echo "(none)"
+          echo "=== storage dirs ==="; ls -ld /var/lib/docker /var/lib/containerd 2>/dev/null || true
+          echo "=== containerd snapshotter? ==="
+          docker info 2>/dev/null | grep -iE "storage driver|driver-type|snapshotter" || true

@@ -43,21 +43,27 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      # maximize-build-space only mounts the volume; the Docker data root still
-      # points at the small root disk. The base image alone is ~20 GB unpacked.
-      - name: Point Docker data root at the build volume
+      # maximize-build-space only mounts the volume at $GITHUB_WORKSPACE. The
+      # image store still lives on the small root disk: recent runner images
+      # back Docker with containerd, so images are unpacked into
+      # /var/lib/containerd and `data-root` is ignored. Bind-mount the big
+      # volume over both stores so it works with either backend.
+      - name: Move container storage onto the build volume
         run: |
           set -eux
-          sudo mkdir -p "$GITHUB_WORKSPACE/.docker-data"
-          printf '{"data-root": "%s/.docker-data"}\n' "$GITHUB_WORKSPACE" \
-            | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
+          sudo mkdir -p "$GITHUB_WORKSPACE/docker" "$GITHUB_WORKSPACE/containerd"
+          sudo systemctl stop docker.socket docker || true
+          sudo systemctl stop containerd || true
+          sudo mount --bind "$GITHUB_WORKSPACE/docker" /var/lib/docker
+          sudo mount --bind "$GITHUB_WORKSPACE/containerd" /var/lib/containerd
+          sudo systemctl start containerd || true
+          sudo systemctl start docker
           for i in $(seq 1 30); do
             if docker info >/dev/null 2>&1; then break; fi
             sleep 2
           done
-          docker info --format 'driver={{.Driver}} root={{.DockerRootDir}}'
-          df -h "$GITHUB_WORKSPACE" /
+          docker info | grep -iE "storage driver|driver-type" || true
+          df -h /var/lib/docker /var/lib/containerd / "$GITHUB_WORKSPACE"
 
       - name: Clone vLLM ${{ env.VLLM_TAG }}
         run: |
@@ -117,9 +123,13 @@ jobs:
       - name: Pull builder image
         run: |
           set -ux
-          df -h / "$GITHUB_WORKSPACE" || true
-          df -i / "$GITHUB_WORKSPACE" || true
-          docker info --format 'root={{.DockerRootDir}}' || true
+          df -h /var/lib/containerd /var/lib/docker / "$GITHUB_WORKSPACE" || true
+          avail=$(df -BG --output=avail /var/lib/containerd | tail -1 | tr -dc '0-9')
+          echo "free on /var/lib/containerd: ${avail}G"
+          if [ "${avail:-0}" -lt 40 ]; then
+            echo "::error::only ${avail}G free for container storage; the image needs ~25G and the build more"
+            exit 1
+          fi
           for i in 1 2 3; do
             if docker pull --platform linux/amd64 "$BASE_IMAGE"; then break; fi
             echo "pull attempt $i failed, retrying in 20s"
