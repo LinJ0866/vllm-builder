@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       deepep:
-        description: "Build DeepEP extension kernels (~30 min, NOT part of the vllm wheel; only needed for the runtime Docker image)"
+        description: "Build DeepEP kernels (~30 min, NOT part of the vllm wheel; only needed for the runtime Docker image)"
         type: boolean
         default: false
       max_jobs:
@@ -14,7 +14,6 @@ on:
 
 env:
   VLLM_TAG: v0.33.0
-  VLLM_COMMIT: 4ba787ec9959e566d3b587a796dff07673324da5
   BASE_IMAGE: pytorch/manylinux2_28-builder:cuda12.6-v2.14.1-rc1
   CUDA_VERSION: 12.6.3
   TORCH_CUDA_ARCH_LIST: "8.6 8.9 9.0"
@@ -28,8 +27,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
-      - uses: actions/checkout@v4
-
       - name: Free disk space
         # Standard runners only have 14 GB on /. This mounts the ~74 GB scratch
         # volume at /mnt and moves the Docker data root there.
@@ -59,8 +56,48 @@ jobs:
         env:
           BUILD_DEEPEP: ${{ inputs.deepep }}
         run: |
-          python3 .github/scripts/patch_dockerfile.py \
-            src/docker/Dockerfile /tmp/Dockerfile.cu126 "$BUILD_DEEPEP"
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import os
+          import pathlib
+
+          SRC = pathlib.Path("src/docker/Dockerfile")
+          DST = pathlib.Path("/tmp/Dockerfile.cu126")
+
+          DEEPEP_ARCH_OLD = """    DEEPEP_ARCH_LIST='9.0a 10.0a' && \\
+          """
+
+          DEEPEP_ARCH_NEW = """    DEEPEP_ARCH_LIST='9.0a 10.0a' && \\
+              # nvcc < 12.8 has no sm_100 support, so DeepEP can only target sm_90a there
+              if [ "$(printf '%s\\n' 12.8 "$CUDA_VERSION" | sort -V | head -n1)" != 12.8 ]; then \\
+                  DEEPEP_ARCH_LIST='9.0a'; \\
+              fi && \\
+          """
+
+          DEEPEP_COPY_BLOCK = """# Copy extension wheels from extensions-build stage for later use
+          COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
+
+          # Record the EP kernels wheel checksum for the same cache-busting purpose.
+          RUN sha256sum /tmp/ep_kernels_workspace/dist/*.whl \\
+              > /tmp/ep_kernels_workspace/dist/wheels.sha256
+          """
+
+
+          def replace_once(text, old, new, what):
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f"error: expected 1 occurrence of {what}, found {n}")
+              return text.replace(old, new)
+
+
+          build_deepep = os.environ.get("BUILD_DEEPEP", "").strip().lower() == "true"
+          text = SRC.read_text()
+          text = replace_once(text, DEEPEP_ARCH_OLD, DEEPEP_ARCH_NEW, "DeepEP arch list")
+          if not build_deepep:
+              text = replace_once(text, DEEPEP_COPY_BLOCK, "", "DeepEP wheel copy block")
+          DST.write_text(text)
+          print(f"wrote {DST} (deepep={build_deepep})")
+          PYEOF
           diff -u src/docker/Dockerfile /tmp/Dockerfile.cu126 || true
 
       - name: Verify builder image
