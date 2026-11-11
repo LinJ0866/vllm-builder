@@ -114,9 +114,22 @@ jobs:
           PYEOF
           diff -u src/docker/Dockerfile /tmp/Dockerfile.cu126 || true
 
-      - name: Verify builder image
+      - name: Pull builder image
         run: |
-          docker pull "$BASE_IMAGE"
+          set -ux
+          df -h / "$GITHUB_WORKSPACE" || true
+          df -i / "$GITHUB_WORKSPACE" || true
+          docker info --format 'root={{.DockerRootDir}}' || true
+          for i in 1 2 3; do
+            if docker pull --platform linux/amd64 "$BASE_IMAGE"; then break; fi
+            echo "pull attempt $i failed, retrying in 20s"
+            sleep 20
+          done
+          df -h / "$GITHUB_WORKSPACE" || true
+          docker images "$BASE_IMAGE" || true
+
+      - name: Verify toolchain
+        run: |
           docker run --rm "$BASE_IMAGE" bash -lc \
             'echo "nvcc: $(nvcc --version | tail -1)"; echo "python: $(python3 --version)"'
 
