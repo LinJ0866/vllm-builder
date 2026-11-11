@@ -135,6 +135,36 @@ jobs:
           docker run --rm "$BASE_IMAGE" bash -lc \
             'echo "nvcc: $(nvcc --version | tail -1)"; echo "python: $(python3 --version)"'
 
+      # The runner dies silently when it runs out of disk or memory: GitHub
+      # never uploads the job log, leaving nothing to debug with. Post samples
+      # to a commit comment so the last state survives the runner.
+      - name: Start resource watchdog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          cat > "$RUNNER_TEMP/watchdog.sh" <<'EOF'
+          #!/bin/bash
+          while true; do
+            {
+              echo "watchdog $(date -u +%H:%M:%S)"
+              echo "- disk:"
+              df -h / /var/lib/containerd 2>/dev/null
+              echo "- mem (MB):"
+              free -m | head -2
+              echo "- top rss:"
+              ps -eo rss,comm --sort=-rss | head -4
+            } > /tmp/wd.txt 2>&1
+            gh api -X POST "repos/$REPO/commits/$SHA/comments" \
+              -f body="$(cat /tmp/wd.txt)" >/dev/null 2>&1
+            sleep 600
+          done
+          EOF
+          chmod +x "$RUNNER_TEMP/watchdog.sh"
+          nohup "$RUNNER_TEMP/watchdog.sh" >/dev/null 2>&1 &
+          echo "watchdog started"
+
       - name: Build wheel
         working-directory: src
         run: |
