@@ -52,7 +52,10 @@ jobs:
           printf '{"data-root": "%s/.docker-data"}\n' "$GITHUB_WORKSPACE" \
             | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
-          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
           docker info --format 'driver={{.Driver}} root={{.DockerRootDir}}'
           df -h "$GITHUB_WORKSPACE" /
 
