@@ -1,0 +1,36 @@
+name: Probe disk layout
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Before
+        run: |
+          echo "=== df -h ==="; df -h
+          echo "=== lsblk ==="; lsblk
+          echo "=== free ==="; free -h
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 4096
+          temp-reserve-mb: 1024
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+
+      - name: After
+        run: |
+          echo "=== df -h ==="; df -h
+          echo "=== lsblk ==="; lsblk
+          echo "=== vgs ==="; sudo vgs || true
+          echo "=== lvs ==="; sudo lvs || true
+          echo "=== docker root ==="; docker info --format '{{.DockerRootDir}}'
+          echo "=== workspace ==="; df -h "$GITHUB_WORKSPACE"
