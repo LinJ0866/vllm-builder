@@ -27,35 +27,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
-      # MUST run before actions/checkout: build-mount-path defaults to
-      # $GITHUB_WORKSPACE, so this mounts a fresh filesystem over the workspace.
-      # Doing it afterwards hides the checked-out repo (and the files in it).
+      # Deliberately no LVM/loop volume: easimon/maximize-build-space hands
+      # nearly the whole root disk to its volume and leaves ~1 GB on /, which
+      # kills the runner mid-build once logs and temp files grow. The runner
+      # images ship 145 GB on /; dropping the preinstalled toolchains is enough.
       - name: Free disk space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 4096
-          temp-reserve-mb: 1024
-          remove-dotnet: true
-          remove-android: true
-          remove-haskell: true
-          remove-codeql: true
-          remove-docker-images: true
-
-      - uses: actions/checkout@v4
-
-      # maximize-build-space only mounts the volume at $GITHUB_WORKSPACE. The
-      # image store still lives on the small root disk: recent runner images
-      # back Docker with containerd, so images are unpacked into
-      # /var/lib/containerd and `data-root` is ignored. Bind-mount the big
-      # volume over both stores so it works with either backend.
-      - name: Move container storage onto the build volume
         run: |
           set -eux
-          sudo mkdir -p "$GITHUB_WORKSPACE/docker" "$GITHUB_WORKSPACE/containerd"
           sudo systemctl stop docker.socket docker || true
           sudo systemctl stop containerd || true
-          sudo mount --bind "$GITHUB_WORKSPACE/docker" /var/lib/docker
-          sudo mount --bind "$GITHUB_WORKSPACE/containerd" /var/lib/containerd
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost
+          # Empty image store; it lives on / and is recreated by containerd.
+          sudo rm -rf /var/lib/docker /var/lib/containerd
+          sudo mkdir -p /var/lib/docker /var/lib/containerd
           sudo systemctl start containerd || true
           sudo systemctl start docker
           for i in $(seq 1 30); do
@@ -63,7 +52,10 @@ jobs:
             sleep 2
           done
           docker info | grep -iE "storage driver|driver-type" || true
-          df -h /var/lib/docker /var/lib/containerd / "$GITHUB_WORKSPACE"
+          df -h / /var/lib/containerd
+          free -h
+
+      - uses: actions/checkout@v4
 
       - name: Clone vLLM ${{ env.VLLM_TAG }}
         run: |
