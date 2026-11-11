@@ -1,0 +1,123 @@
+name: Build vLLM v0.33.0 CUDA 12.6 wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      deepep:
+        description: "Build DeepEP extension kernels (~30 min, NOT part of the vllm wheel; only needed for the runtime Docker image)"
+        type: boolean
+        default: false
+      max_jobs:
+        description: "Ninja parallel jobs"
+        type: string
+        default: "4"
+
+env:
+  VLLM_TAG: v0.33.0
+  VLLM_COMMIT: 4ba787ec9959e566d3b587a796dff07673324da5
+  BASE_IMAGE: pytorch/manylinux2_28-builder:cuda12.6-v2.14.1-rc1
+  CUDA_VERSION: 12.6.3
+  TORCH_CUDA_ARCH_LIST: "8.6 8.9 9.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # 6h is the hard cap for GitHub-hosted runners; leave a margin.
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        # Standard runners only have 14 GB on /. This mounts the ~74 GB scratch
+        # volume at /mnt and moves the Docker data root there.
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 4096
+          temp-reserve-mb: 1024
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+
+      - name: Show disk
+        run: |
+          df -h /
+          docker info --format '{{.Driver}} {{.DockerRootDir}}'
+
+      - name: Clone vLLM ${{ env.VLLM_TAG }}
+        run: |
+          git clone --depth 1 --branch "$VLLM_TAG" \
+            https://github.com/vllm-project/vllm.git src
+          git -C src rev-parse HEAD
+          git -C src describe --tags
+
+      - name: Patch Dockerfile for CUDA 12.6
+        env:
+          BUILD_DEEPEP: ${{ inputs.deepep }}
+        run: |
+          python3 .github/scripts/patch_dockerfile.py \
+            src/docker/Dockerfile /tmp/Dockerfile.cu126 "$BUILD_DEEPEP"
+          diff -u src/docker/Dockerfile /tmp/Dockerfile.cu126 || true
+
+      - name: Verify builder image
+        run: |
+          docker pull "$BASE_IMAGE"
+          docker run --rm "$BASE_IMAGE" bash -lc \
+            'echo "nvcc: $(nvcc --version | tail -1)"; echo "python: $(python3 --version)"'
+
+      - name: Build wheel
+        working-directory: src
+        run: |
+          set -eux
+          docker build \
+            --build-arg max_jobs="${{ inputs.max_jobs }}" \
+            --build-arg nvcc_threads=2 \
+            --build-arg GIT_REPO_CHECK=1 \
+            --build-arg CUDA_VERSION="$CUDA_VERSION" \
+            --build-arg PYTHON_VERSION=3.12 \
+            --build-arg torch_cuda_arch_list="$TORCH_CUDA_ARCH_LIST" \
+            --build-arg BUILD_BASE_IMAGE="$BASE_IMAGE" \
+            --tag vllm-cu126-build:0.33.0 \
+            --target build \
+            --progress plain \
+            -f /tmp/Dockerfile.cu126 \
+            .
+
+      - name: Extract wheel
+        run: |
+          mkdir -p artifacts
+          docker run --rm -v "$PWD/artifacts:/artifacts_host" \
+            vllm-cu126-build:0.33.0 \
+            bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'
+          ls -lh artifacts/dist
+          sha256sum artifacts/dist/*.whl | tee artifacts/dist/SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-cu126-0.33.0-wheel
+          path: |
+            artifacts/dist/*.whl
+            artifacts/dist/SHA256SUMS
+          retention-days: 30
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cu126-${{ github.run_number }}
+          name: vLLM 0.33.0 CUDA 12.6 wheel (build ${{ github.run_number }})
+          body: |
+            `vllm 0.33.0` wheel built for CUDA 12.6, arch `8.6 8.9 9.0`
+            (A40 / L40 / H100), Python 3.12 abi3.
+
+            Install with the cu126 torch index:
+            ```
+            pip install <wheel> --extra-index-url https://download.pytorch.org/whl/cu126
+            ```
+          files: |
+            artifacts/dist/*.whl
+            artifacts/dist/SHA256SUMS
